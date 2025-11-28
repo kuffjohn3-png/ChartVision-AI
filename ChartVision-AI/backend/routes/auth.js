@@ -1,62 +1,64 @@
 import express from 'express';
-import multer from 'multer';
-import auth from '../middleware/auth.js';
-import { uploadLimiter } from '../middleware/rateLimiter.js';
-import Chart from '../models/Chart.js';
-import axios from 'axios';
-import admin from 'firebase-admin';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
+import { apiLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
-const upload = multer({ dest: 'uploads/', limits: { fileSize: 10 * 1024 * 1024 } });
 
-router.post('/upload', auth, uploadLimiter, upload.single('chart'), async (req, res, next) => {
+// Register
+router.post('/register', apiLimiter, async (req, res) => {
+  const { email, password } = req.body;
+
   try {
-    if (!req.file) return res.status(400).json({ msg: 'No file uploaded' });
-
-    const formData = new FormData();
-    formData.append('chart', fs.createReadStream(req.file.path), req.file.originalname);
-
-    const aiResponse = await axios.post(process.env.AI_SERVICE_URL + '/predict', formData, {
-      headers: formData.getHeaders(),
-      timeout: 20000
-    });
-
-    const chart = new Chart({
-      userId: req.user.id,
-      fileName: req.file.originalname,
-      filePath: '/uploads/' + req.file.filename,
-      symbol: aiResponse.data.symbol,
-      patterns: aiResponse.data.patterns || []
-    });
-
-    await chart.save();
-
-    // Push notification if high confidence
-    if (chart.patterns.some(p => p.confidence >= 0.90) && req.user.fcmToken) {
-      await admin.messaging().send({
-        token: req.user.fcmToken,
-        notification: {
-          title: `New Pattern Detected!`,
-          body: `${chart.symbol} – ${chart.patterns[0].name} ${Math.round(chart.patterns[0].confidence * 100)}%`
-        }
-      });
+    if (!email || !password) {
+      return res.status(400).json({ msg: 'Email and password required' });
     }
 
-    // Clean up temp file
-    fs.unlinkSync(req.file.path);
+    let user = await User.findOne({ email: email.toLowerCase() });
+    if (user) {
+      return res.status(400).json({ msg: 'User already exists' });
+    }
 
-    res.json(chart);
+    const passwordHash = await bcrypt.hash(password, 12);
+    user = new User({ email: email.toLowerCase(), passwordHash });
+    await user.save();
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    res.status(201).json({
+      msg: 'User created successfully',
+      token,
+      user: { id: user._id, email: user.email }
+    });
   } catch (err) {
-    next(err);
+    res.status(500).json({ msg: 'Server error' });
   }
 });
 
-router.get('/list', auth, async (req, res, next) => {
+// Login
+router.post('/login', apiLimiter, async (req, res) => {
+  const { email, password } = req.body;
+
   try {
-    const charts = await Chart.find({ userId: req.user.id }).sort({ createdAt: -1 });
-    res.json(charts);
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(400).json({ msg: 'Invalid credentials' });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
+    if (!isMatch) {
+      return res.status(400).json({ msg: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    res.json({
+      token,
+      user: { id: user._id, email: user.email }
+    });
   } catch (err) {
-    next(err);
+    res.status(500).json({ msg: 'Server error' });
   }
 });
 
