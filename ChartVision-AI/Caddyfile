@@ -1,0 +1,3 @@
+chartvision.ai {
+  reverse_proxy backend:5000
+}
